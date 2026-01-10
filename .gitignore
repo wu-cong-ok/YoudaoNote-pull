@@ -12,3 +12,6 @@ dist
 *.spec
 wine
 xiaobai
+.DS_Store
+.venv/
+youdaonote/

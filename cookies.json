@@ -1,22 +1,8 @@
 {
     "cookies": [
-        [
-            "YNOTE_CSTK",
-            "**",
-            ".note.youdao.com",
-            "/"
-        ],
-        [
-            "YNOTE_LOGIN",
-            "**",
-            ".note.youdao.com",
-            "/"
-        ],
-        [
-            "YNOTE_SESS",
-            "**",
-            ".note.youdao.com",
-            "/"
-        ]
+        ["YNOTE_CSTK", "by0jALJe", ".note.youdao.com", "/"],
+        ["YNOTE_LOGIN", "3||1768029960102", ".note.youdao.com", "/"],
+        ["YNOTE_SESS", "v2|2dM9hvSw6mJyk4qL6L6FRYl0HPz0HeB0Jz0MTBPLzE0gyhHU56LYA0JZhflEkfpS0pzhMOfh4JK06ZhHQzhM6B0gyhMq4n4wy0", ".note.youdao.com", "/"],
+        ["__yadk_uid", "YCPTop7bNsj5J2TLEAyKNi8pBmwIHsfV", ".youdao.com", "/"]
     ]
 }
