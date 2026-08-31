@@ -2,5 +2,7 @@
     "local_dir": "",
     "ydnote_dir": "",
     "smms_secret_token": "",
-    "is_relative_path": true
+    "is_relative_path": true,
+    "auto_convert_png_to_webp": true,
+    "keep_png_after_convert": false
 }

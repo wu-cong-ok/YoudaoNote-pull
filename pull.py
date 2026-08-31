@@ -11,9 +11,15 @@ import traceback
 from enum import Enum
 from typing import Tuple
 
+import re as re_module
+
+def _normalize_md_blank_lines(text):
+    return re_module.sub(r'\n{3,}', '\n\n', text)
+
 from core import log
 from core.api import YoudaoNoteApi
 from core.common import get_script_directory
+from core.convert_png2webp import run as run_png2webp
 from core.covert import YoudaoNoteConvert
 from core.image import ImagePull
  
@@ -31,6 +37,36 @@ class YoudaoNotePull(object):
         self.youdaonote_api = None
         self.smms_secret_token = None
         self.is_relative_path = None
+        self.config_dict = {}
+
+    def find_file(self, dir_id, target_name, path=""):
+        dir_info = self.youdaonote_api.get_dir_info_by_id(dir_id)
+        for entry in dir_info.get("entries", []):
+            fe = entry["fileEntry"]
+            name = fe["name"]
+            name_no_ext = os.path.splitext(name)[0]
+            full_path = os.path.join(path, name_no_ext)
+            if fe["dir"]:
+                found = self.find_file(fe["id"], target_name, full_path)
+                if found:
+                    return found
+            elif name_no_ext == target_name:
+                return {"id": fe["id"], "name": name, "path": full_path}
+        return None
+
+    def pull_single_by_name(self, target_name):
+        root_id = self.youdaonote_api.get_root_dir_info_id()["fileEntry"]["id"]
+        found = self.find_file(root_id, target_name)
+        if not found:
+            print(f"未找到笔记: {target_name}")
+            return
+        parent_dir = os.path.dirname(found["path"])
+        sub_dir = os.path.join(self.root_local_dir, parent_dir)
+        self._add_or_update_file(
+            found["id"], found["name"], sub_dir,
+            modify_time=0, create_time=0
+        )
+        print(f"已拉取: {found['path']}.md")
 
     def _covert_config(self) -> Tuple[dict, str]:
         config_path = os.path.join(get_script_directory(), "config.json")
@@ -39,6 +75,7 @@ class YoudaoNotePull(object):
         try:
             with open(config_path, "rb") as f:
                 config_dict = json.loads(f.read().decode("utf-8"))
+            self.config_dict = config_dict
             return config_dict, ""
         except Exception as e:
             return {}, f"解析 config.json 出错: {str(e)}"
@@ -117,7 +154,8 @@ class YoudaoNotePull(object):
         actual_save_path = final_md_path if file_type != FileType.OTHER else os.path.join(local_dir, clean_name).replace("\\", "/")
 
         # 3. 检查更新
-        if os.path.exists(actual_save_path) and modify_time <= os.path.getmtime(actual_save_path):
+        # modify_time=0 means force re-download
+        if os.path.exists(actual_save_path) and modify_time != 0 and modify_time <= os.path.getmtime(actual_save_path):
             return
 
         try:
@@ -128,21 +166,31 @@ class YoudaoNotePull(object):
             temp_save_path = os.path.join(local_dir, clean_name).replace("\\", "/")
             with open(temp_save_path, "wb") as f:
                 f.write(response.content)
-
+            
             # 4. 转换逻辑 (转换后 temp_save_path 可能会消失，生成 final_md_path)
             if file_type == FileType.XML:
-                try: YoudaoNoteConvert.covert_xml_to_markdown(temp_save_path)
-                except: YoudaoNoteConvert.covert_html_to_markdown(temp_save_path)
+                try: 
+                    YoudaoNoteConvert.covert_xml_to_markdown(temp_save_path)
+                except: 
+                    YoudaoNoteConvert.covert_html_to_markdown(temp_save_path)
             elif file_type == FileType.JSON:
                 YoudaoNoteConvert.covert_json_to_markdown(temp_save_path)
 
-            # 5. 核心修复：确保后续操作在“确实存在”的文件上进行
-            target_path = actual_save_path if os.path.exists(actual_save_path) else temp_save_path
-            
+            # 5. 对直接返回 Markdown 的文件做空行归一化
+            if file_type == FileType.MARKDOWN and os.path.exists(temp_save_path):
+                with open(temp_save_path, "r", encoding="utf-8") as f:
+                    raw = f.read()
+                normalized = _normalize_md_blank_lines(raw)
+                if normalized != raw:
+                    with open(temp_save_path, "w", encoding="utf-8") as f:
+                        f.write(normalized)
+
+            # 6. 核心修复：确保后续操作在"确实存在"的文件上进行
+            target_path = actual_save_path if os.path.exists(actual_save_path) else temp_save_path 
             if file_type != FileType.OTHER or suffix == MARKDOWN_SUFFIX:
                 if os.path.exists(target_path):
                     ImagePull(self.youdaonote_api, self.smms_secret_token, self.is_relative_path).migration_ydnote_url(target_path)
-
+            
             if os.path.exists(target_path):
                 os.utime(target_path, (create_time, modify_time))
                 logging.info(f"同步成功: {target_path}")
@@ -159,8 +207,27 @@ if __name__ == "__main__":
             print(f"❌ 错误: {err}")
             sys.exit(1)
         print("✅ 登录成功，开始同步笔记...")
-        puller.pull_dir_by_id_recursively(dir_id, puller.root_local_dir)
+        if len(sys.argv) > 1:
+            for name in sys.argv[1:]:
+                puller.pull_single_by_name(name)
+        else:
+            puller.pull_dir_by_id_recursively(dir_id, puller.root_local_dir)
         print("✨ 全部同步完成！")
+
+        if puller.config_dict.get("auto_convert_png_to_webp"):
+            print()
+            print("🚀 开始 PNG → WebP 转换...")
+            result = run_png2webp(
+                vault=puller.root_local_dir,
+                keep=puller.config_dict.get("keep_png_after_convert", False),
+            )
+            if "error" in result:
+                print(f"❌ {result['error']}")
+            else:
+                print(f"  PNG 转换: {result['converted']}/{result['png_found']}")
+                print(f"  MD 更新 : {result['markdown_modified']} 文件, {result['links_updated']} 链接")
+                if "saved_mb" in result:
+                    print(f"  节省空间: {result['saved_mb']:.2f} MB")
     except Exception as e:
         print(f"💥 运行异常: {str(e)}")
         traceback.print_exc()

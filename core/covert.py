@@ -6,6 +6,16 @@ from typing import Tuple
 
 MARKDOWN_SUFFIX = ".md"
 
+import re
+
+_ordered_counters = {}
+
+def _reset_ordered_counters():
+    _ordered_counters.clear()
+
+def _normalize_blank_lines(text):
+    return re.sub(r'\n{3,}', '\n\n', text)
+
 
 class XmlElementConvert(object):
     """
@@ -13,9 +23,117 @@ class XmlElementConvert(object):
     """
 
     @staticmethod
+    def _parse_inline_styles(element):
+        raw_text = ""
+        styles = []
+        for child in list(element):
+            tag = child.tag.split("}")[-1]
+            if tag == "text":
+                raw_text = child.text or ""
+            elif tag == "inline-styles":
+                for style_elem in list(child):
+                    style_tag = style_elem.tag.split("}")[-1]
+                    from_val = to_val = value = None
+                    for sub in list(style_elem):
+                        sub_tag = sub.tag.split("}")[-1]
+                        if sub_tag == "from":
+                            from_val = int(sub.text) if sub.text else 0
+                        elif sub_tag == "to":
+                            to_val = int(sub.text) if sub.text else 0
+                        elif sub_tag == "value":
+                            value = sub.text
+                    if from_val is not None and to_val is not None and value == "true":
+                        styles.append((from_val, to_val, style_tag))
+        if not raw_text:
+            return ""
+        # Build a list of (pos, insert_text) operations, insert in reverse order
+        inserts = []
+        for from_pos, to_pos, style_tag in styles:
+            if style_tag in ("bold", "b"):
+                inserts.append((to_pos, "**"))
+                inserts.append((from_pos, "**"))
+            elif style_tag in ("italic", "i", "em"):
+                inserts.append((to_pos, "*"))
+                inserts.append((from_pos, "*"))
+            elif style_tag in ("strike", "s", "del", "line-through"):
+                inserts.append((to_pos, "~~"))
+                inserts.append((from_pos, "~~"))
+            elif style_tag in ("a", "link", "href"):
+                url = ""
+                for style_elem in list(element):
+                    for se in list(style_elem):
+                        for sub in list(se):
+                            sub_tag = sub.tag.split("}")[-1]
+                            if sub_tag in ("href", "url", "link"):
+                                url = sub.text or ""
+                if url:
+                    inserts.append((to_pos, "]({})".format(url)))
+                    inserts.append((from_pos, "[{}".format(raw_text[from_pos:to_pos])))
+        # Sort by position descending to avoid offset issues
+        inserts.sort(key=lambda x: -x[0])
+        chars = list(raw_text)
+        for pos, ins in inserts:
+            if 0 <= pos <= len(chars):
+                chars.insert(pos, ins)
+        return "".join(chars)
+
+    @staticmethod
+    def _parse_rich_text(element):
+        tag = element.tag.split("}")[-1]
+        children = list(element)
+
+        if "text" in tag and not children:
+            return element.text or ""
+
+        if not children:
+            return element.text or ""
+
+        # Use inline-styles approach for para-like elements
+        if tag in ("para", "p", "div", "span"):
+            return XmlElementConvert._parse_inline_styles(element)
+
+        parts = []
+        for child in children:
+            child_tag = child.tag.split("}")[-1]
+            child_text = XmlElementConvert._parse_rich_text(child)
+            if not child_text:
+                continue
+            if child_tag in ("strong", "b"):
+                parts.append("**{}**".format(child_text))
+            elif child_tag in ("em", "i"):
+                parts.append("*{}*".format(child_text))
+            elif child_tag in ("strike", "s", "del", "line-through"):
+                parts.append("~~{}~~".format(child_text))
+            elif child_tag in ("a", "link"):
+                url = ""
+                for sub in list(child):
+                    sub_tag = sub.tag.split("}")[-1]
+                    if sub_tag in ("href", "url", "link"):
+                        url = sub.text or ""
+                if url:
+                    parts.append("[{text}]({url})".format(text=child_text, url=url))
+                else:
+                    parts.append(child_text)
+            else:
+                parts.append(child_text)
+        return "".join(parts)
+
+    @staticmethod
     def convert_para_func(**kwargs):
-        """正常文本（粗体、斜体、删除线、链接）"""
-        return kwargs.get("text")
+        element = kwargs.get("element")
+        return XmlElementConvert._parse_rich_text(element)
+
+    @staticmethod
+    def convert_catalogue_func(**kwargs):
+        element = kwargs.get("element")
+        text_el = element.find("{http://note.youdao.com}text")
+        indent_el = element.find(".//{http://note.youdao.com}indent")
+        text = text_el.text.strip() if text_el is not None and text_el.text else ""
+        indent = int(indent_el.text) if indent_el is not None and indent_el.text else 0
+        prefix = "  " * indent + "- "
+        anchor = re.sub(r'[^\w\u4e00-\u9fff\s-]', '', text.strip())
+        anchor = re.sub(r'\s+', '-', anchor).strip('-')
+        return prefix + "[{text}](#{anchor})".format(text=text, anchor=anchor)
 
     @staticmethod
     def convert_heading_func(**kwargs):
@@ -57,7 +175,7 @@ class XmlElementConvert(object):
         language = XmlElementConvert.get_text_by_key(
             list(kwargs.get("element")), "language"
         )
-        return "```{language}\r\n{code}```".format(
+        return "```{language}\n{code}```".format(
             language=language, code=kwargs.get("text")
         )
 
@@ -91,7 +209,9 @@ class XmlElementConvert(object):
             # 补丁：使用空格缩进提高 Obsidian 兼容性
             return "- {text}".format(text=text)
         elif is_ordered == "ordered":
-            return "1. {text}".format(text=text)
+            num = _ordered_counters.get(list_id, 0) + 1
+            _ordered_counters[list_id] = num
+            return "{}. {text}".format(num, text=text)
 
     @staticmethod
     def convert_table_func(**kwargs):
@@ -102,7 +222,6 @@ class XmlElementConvert(object):
         content = XmlElementConvert.get_text_by_key(element, "content")
 
         table_data_str = f""
-        nl = "\r\n"
         table_data = json.loads(content)
         table_data_len = len(table_data["widths"])
         table_data_arr = []
@@ -128,7 +247,7 @@ class XmlElementConvert(object):
             table_data_str += "|"
             for table_data in table_line:
                 table_data_str += f" %s |" % table_data
-            table_data_str += f"{nl}"
+            table_data_str += "\n"
 
         return table_data_str
 
@@ -186,12 +305,12 @@ class JsonConvert(object):
     def _convert_text_attribute(self, text: str, text_attrs: list):
         if isinstance(text_attrs, list) and text_attrs and text:
             for attr in text_attrs:
-                # 2 代表属性类型: b(粗体), i(斜体), s(删除线)
+                # 2 代表属性类型: b(粗体), i(斜体), d/s(删除线)
                 if attr["2"] == "b":
                     text = f"**{text}**"
                 elif attr["2"] == "i":
                     text = f"*{text}*"
-                elif attr["2"] == "s":
+                elif attr["2"] in ("s", "d"):
                     text = f"~~{text}~~"
         return text
 
@@ -239,8 +358,9 @@ class JsonConvert(object):
         type_name = content.get("4").get("l")
         text = self._get_common_text(content=content)
         if text and type_name:
-            level = int(type_name.replace("h", ""))
-            text = " ".join(["#" * int(level), text.strip()])
+            if type_name.startswith('h'):
+                level = int(type_name.replace("h", ""))
+                text = " ".join(["#" * int(level), text.strip()])
         return text
 
     def convert_im_func(self, content):
@@ -259,7 +379,7 @@ class JsonConvert(object):
         for code in codes:
             text = self._get_common_text(code)
             code_block += text + "\n"
-        return "```{language}\r\n{code_block}```".format(
+        return "```{language}\n{code_block}```".format(
             language=language, code_block=code_block
         )
 
@@ -269,7 +389,7 @@ class JsonConvert(object):
         for line in lines:
             text = self._get_common_text(line)
             highlight_block += text + "\n"
-        return "```\r\n{highlight_block}```".format(highlight_block=highlight_block)
+        return "```\n{highlight_block}```".format(highlight_block=highlight_block)
 
     def convert_q_func(self, content):
         q_text_list = content["5"]
@@ -283,12 +403,16 @@ class JsonConvert(object):
     def convert_l_func(self, content):
         text = self._get_common_text(content=content)
         is_ordered = content.get("4").get("lt")
+        level = content.get("4").get("ll", 1)
+        indent = "    " * (level - 1)
         if is_ordered == "unordered":
-            level = content.get("4").get("ll", 1)
-            # 补丁：双空格缩进，防止 Obsidian 渲染错误
-            return "  " * (level - 1) + "- {text}".format(text=text)
+            return indent + "- {text}".format(text=text)
         elif is_ordered == "ordered":
-            return "1. {text}".format(text=text)
+            li = content.get("4").get("li")
+            key = (li, level)
+            num = _ordered_counters.get(key, 0) + 1
+            _ordered_counters[key] = num
+            return indent + "{}. {text}".format(num, text=text)
 
     def convert_todo_func(self, content):
         """
@@ -300,7 +424,6 @@ class JsonConvert(object):
         return "{checkbox} {text}".format(checkbox=checkbox, text=text)
 
     def convert_t_func(self, content):
-        nl = "\r\n"
         tr_list = content["5"]
         table_lines = ""
         for index, tc in enumerate(tr_list):
@@ -312,12 +435,25 @@ class JsonConvert(object):
                 table_line = "| "
             for table_content in table_content_list:
                 try:
-                    table_text_list = table_content.get("5")[0].get("5")[0].get("7")
-                    table_text = table_text_list[0]["8"] if table_text_list else " "
-                except:
+                    cell_parts = []
+                    # 遍历 cell 的所有子元素
+                    for child in table_content.get("5", []):
+                        # 遍历 child 的所有子元素（文本/链接）
+                        for sub in child.get("5", []):
+                            # 普通文本（type=2）
+                            if sub.get("7"):
+                                table_text = sub["7"][0].get("8", " ")
+                                cell_parts.append(table_text)
+                            # 超链接（type=li）
+                            elif sub.get("6") == "li":
+                                link_text = self._get_common_text(sub)
+                                if link_text:
+                                    cell_parts.append(link_text)
+                    table_text = " ".join(cell_parts).strip() or " "
+                except Exception:
                     table_text = " "
                 table_line = table_line + table_text + " | "
-            table_lines = table_lines + table_line + f"{nl}"
+            table_lines = table_lines + table_line.rstrip() + "\n"
         return table_lines
 
 
@@ -340,6 +476,7 @@ class YoudaoNoteConvert(object):
 
     @staticmethod
     def _covert_xml_to_markdown_content(file_path):
+        _reset_ordered_counters()
         element_tree = ET.parse(file_path)
         note_element = element_tree.getroot()
 
@@ -349,22 +486,60 @@ class YoudaoNoteConvert(object):
                 list_item[child.attrib["id"]] = child.attrib["type"]
 
         body_element = note_element[1]
-        new_content_list = []
+        processed = []
         for element in list(body_element):
             text = XmlElementConvert.get_text_by_key(list(element))
-            # 补丁：处理命名空间前缀，确保 todo 能正确映射函数
             tag_raw = element.tag.split("}")[-1]
             name = "todo" if "todo" in tag_raw else tag_raw.replace("-", "_")
-            
+
             convert_func = getattr(
                 XmlElementConvert, "convert_{}_func".format(name), None
             )
             if not convert_func:
-                new_content_list.append(text)
-                continue
-            line_content = convert_func(text=text, element=element, list_item=list_item)
-            new_content_list.append(line_content)
-        return f"\r\n\r\n".join(new_content_list)
+                line_content = XmlElementConvert._parse_rich_text(element)
+            else:
+                line_content = convert_func(text=text, element=element, list_item=list_item)
+
+            if line_content:
+                processed.append({
+                    "type": name if convert_func else None,
+                    "content": line_content.rstrip("\r\n"),
+                })
+
+        result = []
+        for i, item in enumerate(processed):
+            content = item["content"]
+            current_type = item["type"]
+
+            # 非列表行：删除行首所有空白字符（含 \xa0 等 Unicode 空白），避免渲染为代码块
+            content_stripped = content.lstrip()
+            is_list_item = re.match(r'(?:[-*+]|\d+\.)\s', content_stripped) is not None
+            if not is_list_item:
+                content = content_stripped
+
+            is_bold_line = re.match(r"^\*\*.+\*\*$", content) is not None
+
+            if is_bold_line and result:
+                result.append("")
+
+            is_block = re.match(r'^\s*(?:[-*+]|\d+\.)\s', content) or content.startswith("|") or content.startswith("#")
+            result.append(content if is_block else content + "  ")
+
+            if i < len(processed) - 1:
+                next_type = processed[i + 1]["type"]
+                next_content = processed[i + 1]["content"]
+                next_is_bold_line = re.match(r"^\*\*.+\*\*$", next_content) is not None
+
+                if current_type == "catalogue" or next_type == "catalogue":
+                    continue
+                if current_type in ["h", "heading"] or next_type in ["h", "heading"]:
+                    result.append("")
+                elif not is_bold_line and not next_is_bold_line and \
+                     current_type != next_type and \
+                     current_type is not None and next_type is not None:
+                    result.append("")
+
+        return _normalize_blank_lines("\n".join(result))
 
     @staticmethod
     def covert_xml_to_markdown(file_path) -> bool:
@@ -374,13 +549,14 @@ class YoudaoNoteConvert(object):
             os.rename(file_path, new_file_path)
             return False
         new_content = YoudaoNoteConvert._covert_xml_to_markdown_content(file_path)
-        os.rename(file_path, new_file_path)
+        os.remove(file_path)
         with open(new_file_path, "wb") as f:
             f.write(new_content.encode("utf-8"))
         return True
 
     @staticmethod
-    def _covert_json_to_markdown_content(file_path):
+    def _covert_json_to_markdown_content_smart(file_path):
+        _reset_ordered_counters()
         new_content_list = []
         with open(file_path, "r", encoding="utf-8") as f:
             try:
@@ -390,9 +566,10 @@ class YoudaoNoteConvert(object):
                 json_data = {}
 
         json_contents = json_data.get("5", [])
+        
+        processed = []
         for content in json_contents:
             ctype = content.get("6")
-            # 补丁：如果类型包含 todo 字样，强制走 todo 逻辑
             if ctype and "todo" in ctype:
                 line_content = JsonConvert().convert_todo_func(content)
             elif ctype:
@@ -400,10 +577,45 @@ class YoudaoNoteConvert(object):
                 line_content = convert_func(content) if convert_func else JsonConvert().convert_text_func(content)
             else:
                 line_content = JsonConvert().convert_text_func(content)
-
+            
             if line_content:
-                new_content_list.append(line_content)
-        return f"\r\n\r\n".join(new_content_list)
+                processed.append({
+                    'type': ctype,
+                    'content': line_content.rstrip('\r\n')
+                })
+        
+        result = []
+        for i, item in enumerate(processed):
+            content = item['content']
+            current_type = item['type']
+
+            # 非列表行：删除行首所有空白字符（含 \xa0 等 Unicode 空白），避免渲染为代码块
+            content_stripped = content.lstrip()
+            is_list_item = re.match(r'(?:[-*+]|\d+\.)\s', content_stripped) is not None
+            if not is_list_item:
+                content = content_stripped
+
+            is_bold_line = re.match(r'^\*\*.+\*\*$', content) is not None
+
+            if is_bold_line and result:
+                result.append('')
+
+            no_trailing = re.match(r'^\s*(?:[-*+]|\d+\.)\s', content) is not None or content.startswith('|')
+            result.append(content if no_trailing else content + '  ')
+
+            if i < len(processed) - 1:
+                next_type = processed[i+1]['type']
+                next_content = processed[i+1]['content']
+                next_is_bold_line = re.match(r'^\*\*.+\*\*$', next_content) is not None
+
+                if current_type in ['h'] or next_type in ['h']:
+                    result.append('')
+                elif not is_bold_line and not next_is_bold_line and \
+                     current_type != next_type and \
+                     current_type is not None and next_type is not None:
+                    result.append('')
+
+        return _normalize_blank_lines("\n".join(result))
 
     @staticmethod
     def covert_json_to_markdown(file_path) -> str:
@@ -412,7 +624,7 @@ class YoudaoNoteConvert(object):
         if os.path.getsize(file_path) == 0:
             os.rename(file_path, new_file_path)
             return False
-        new_content = YoudaoNoteConvert._covert_json_to_markdown_content(file_path)
+        new_content = YoudaoNoteConvert._covert_json_to_markdown_content_smart(file_path)
         with open(new_file_path, "wb") as f:
             f.write(new_content.encode("utf-8"))
         if os.path.exists(file_path):
