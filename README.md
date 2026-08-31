@@ -138,13 +138,17 @@ pip install -r requirements.txt
     "ydnote_dir": "",
     "smms_secret_token": "",
     "is_relative_path": true
+    "auto_convert_png_to_webp": true,
+    "keep_png_after_convert": false
 }
 ```
 
 * `local_dir`：选填，本地存放导出文件的文件夹（绝对路径），不填则默认为当前文件夹
 * `ydnote_dir`：选填，有道云笔记指定导出文件夹名，不填则导出所有文件
 * `smms_secret_token`：选填， [SM.MS](https://sm.ms) 的 `Secret Token`（注册后 -> Dashboard -> API Token），用于上传笔记中有道云图床图片到 SM.MS 图床，不填则只下载到本地（`youdaonote-images` 文件夹），`Markdown` 中使用本地链接
-* `is_relative_path`：选填，在 MD 文件中图片 / 附件是否采用相对路径展示，不填或 false 为绝对路径，true 为相对路径    
+* `is_relative_path`：选填，在 MD 文件中图片 / 附件是否采用相对路径展示，不填或 false 为绝对路径，true 为相对路径   
+* `auto_convert_png_to_webp` ：选填，是否将笔记中涉及的PNG图片转换为占用空间更小的Webp格式，不填默认为false
+* `keep_png_after_convert`：选填，PNG图片转换为Webp格式后，是否保留原始PNG图片，不填默认为false
 
 示例：
 
