@@ -423,6 +423,23 @@ class JsonConvert(object):
         checkbox = "- [x]" if ls == "done" else "- [ ]"
         return "{checkbox} {text}".format(checkbox=checkbox, text=text)
 
+    def convert_ca_func(self, content):
+        """JSON 目录索引（ca 类型），转为 TOC 链接列表"""
+        lines = []
+        for ci in content.get("5", []):
+            if ci.get("6") != "ci":
+                continue
+            indent = ci.get("4", {}).get("s", {}).get("in", 0)
+            level = indent // 28  # 每级缩进 28px
+            text = self._get_common_text(ci)
+            if not text:
+                continue
+            anchor = re.sub(r'[^\w\u4e00-\u9fff\s-]', '', text.strip())
+            anchor = re.sub(r'\s+', '-', anchor).strip('-')
+            prefix = "    " * level
+            lines.append(f"{prefix}- [{text}](#{anchor})")
+        return "\n".join(lines)
+
     def convert_t_func(self, content):
         tr_list = content["5"]
         table_lines = ""
