@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import subprocess
 from typing import Tuple
 from urllib import parse
 from urllib.parse import urlparse
@@ -8,6 +9,8 @@ from urllib.parse import urlparse
 import requests
 
 REGEX_IMAGE_URL = re.compile(r"!\[.*?\]\((.*?note\.youdao\.com.*?)\)")
+# 匹配无扩展名的本地图片路径（旧版下载遗留）
+REGEX_LOCAL_IMG_NO_EXT = re.compile(r"!\[.*?\]\((images/[^).\s]+)\)")
 REGEX_ATTACH = re.compile(r"\[(.*?)\]\(((http|https)://note\.youdao\.com.*?)\)")
 # 有道云笔记的图片地址
 IMAGES = "images"
@@ -65,6 +68,37 @@ class ImagePull:
 
             image_path = self._url_encode(image_path)
             content = content.replace(image_url, image_path)
+
+        # 处理无扩展名的本地图片路径（旧版下载遗留）
+        local_imgs_no_ext = REGEX_LOCAL_IMG_NO_EXT.findall(content)
+        if local_imgs_no_ext:
+            logging.info("正在修复无扩展名的本地图片「{}」...".format(file_path))
+            images_dir = os.path.join(os.path.dirname(file_path), IMAGES)
+            for img_ref in local_imgs_no_ext:
+                filename = img_ref.replace(IMAGES + "/", "")
+                # 已有扩展名则跳过
+                if "." in filename:
+                    continue
+                old_path = os.path.join(images_dir, filename)
+                if not os.path.isfile(old_path):
+                    continue
+                # 用 file 命令检测真实类型
+                result = subprocess.run(
+                    ["file", "--brief", old_path], capture_output=True, text=True
+                )
+                file_type = result.stdout.strip()
+                if "PNG" in file_type:
+                    ext = ".png"
+                elif "JPEG" in file_type:
+                    ext = ".jpg"
+                elif "GIF" in file_type:
+                    ext = ".gif"
+                else:
+                    ext = ".png"
+                new_path = old_path + ext
+                if not os.path.exists(new_path):
+                    os.rename(old_path, new_path)
+                content = content.replace(img_ref, IMAGES + "/" + filename + ext)
 
         # 附件
         attach_name_and_url_list = REGEX_ATTACH.findall(content)
@@ -177,7 +211,7 @@ class ImagePull:
                 if realUrl.get("download")
                 else ""
             )
-            file_name = file_basename + filename
+            file_name = file_basename + (filename if filename else file_suffix)
         else:
             file_name = "".join([file_basename, file_suffix])
         local_file_path = os.path.join(local_file_dir, file_name).replace("\\", "/")

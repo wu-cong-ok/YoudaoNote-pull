@@ -291,15 +291,26 @@ class JsonConvert(object):
         all_text = ""
         five_contents = content.get("5")
         if five_contents:
-            seven_contents = five_contents[0].get("7")
-            if not seven_contents:
-                return all_text
-            for seven_content in seven_contents:
-                text = seven_content.get("8")
-                text_attrs = seven_content.get("9")
-                if text and text_attrs:
-                    text = self._convert_text_attribute(text, text_attrs)
-                all_text += text if text else ""
+            for child in five_contents:
+                # 普通文本
+                seven_contents = child.get("7")
+                if seven_contents:
+                    for seven_content in seven_contents:
+                        text = seven_content.get("8")
+                        text_attrs = seven_content.get("9")
+                        if text and text_attrs:
+                            text = self._convert_text_attribute(text, text_attrs)
+                        all_text += text if text else ""
+                    continue
+                # 超链接（type=li）
+                if child.get("6") == "li":
+                    link_text = self._get_common_text(child)
+                    four = child.get("4", {})
+                    url = four.get("hf") or four.get("id") or four.get("rid")
+                    if link_text and url:
+                        all_text += f"[{link_text}]({url})"
+                    elif link_text:
+                        all_text += link_text
         return all_text
 
     def _convert_text_attribute(self, text: str, text_attrs: list):
